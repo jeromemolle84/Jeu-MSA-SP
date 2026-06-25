@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Jeu MSA SP+ — La confiance en action — MSA Alpes Vaucluse</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+  <canvas id="game" width="1288" height="952"></canvas>
+
+  <!-- Couche interface (HTML par-dessus le canvas) -->
+  <div id="ui"></div>
+
+  <!-- Indicateur d'interaction -->
+  <div id="hint" class="hint hidden"><kbd>E</kbd> Interagir</div>
+
+  <!-- Commandes tactiles (mobile) -->
+  <div id="touch"></div>
+
+  <!-- Barre d'aide commandes -->
+  <div id="helpbar" class="helpbar hidden">
+    <span><kbd>↑↓←→</kbd> / <kbd>ZQSD</kbd> Se déplacer</span>
+    <span><kbd>E</kbd> Interagir</span>
+    <span><kbd>J</kbd> Carnet</span>
+    <span><kbd>Échap</kbd> Retour</span>
+  </div>
+</div>
+
+<script src="data.js"></script>
+<script src="game.js"></script>
+</body>
+</html>
