@@ -1701,7 +1701,6 @@ function showToast(msg){
   clearTimeout(toastT);
   toastT=setTimeout(()=>{ el.style.transition="opacity .4s"; el.style.opacity="0"; }, 2600);
 }
-
 /* ----------------------------- Écran titre (calibré sur menu_principal) ----------------------------- */
 function showTitle(){
   State.screen="title"; State.overlay=null; setSceneTag(false);
@@ -1777,7 +1776,7 @@ function showCredits(){
          <h3>Réalisation</h3>
          <p>
            Jeu conçu et réalisé sur son temps libre par <strong>Jérôme Mollé</strong>,
-           avec le concours de l'intelligence artificielle.
+           avec le concours de l'intelligence artificielle. Toute ressemblance avec des personnes existantes est fortuite.
          </p>
        </section>
 
