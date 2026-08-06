@@ -43,6 +43,9 @@ const State = {
     gapMatchDone:false, gapMatchSecond:false,
     gapQDone:false, gapQSecond:false,
     gapAffichesDone:false, gapAffichesSecond:false, gapAffichesStarted:false,
+    clotildeDone:false, clotildeSecond:false,
+    karineDone:false, karineSecond:false,
+    mhDone:false, mhSecond:false,
     endingSequenceStarted:false,
   },
   notes: {},             // id de note -> true (débloquée)
@@ -160,17 +163,28 @@ const PY = (fy)=> fy*GAME.baseH;
    et centrée sur le joueur. La caméra reste bornée à l'image pour ne jamais
    afficher de vide. Renvoie {zoom, tx, ty} en pixels canvas de base. */
 let camLerp = {x:0.5, y:0.5, init:false};
+/* Cache de la caméra : getCamera() était appelée plusieurs fois par image
+   (rendu, étiquettes de PNJ, indicateur d'interaction). Le lissage avançait
+   donc d'autant de crans par image : le suivi accélérait selon le nombre de
+   PNJ affichés et la fréquence de l'écran. On ne l'avance plus qu'une fois
+   par image, avec un pas dépendant du temps écoulé. */
+let _camFrame = -1, _camCache = null, _camDt = 1/60;
+function advanceCamera(dt){ _camDt = Math.max(0.001, Math.min(0.05, dt)); }
 function getCamera(){
+  if(_camFrame === _renderFrame && _camCache) return _camCache;
   const s = SCENES[State.scene];
   if(!s || !s.camera || !s.camera.follow){
-    return {zoom:1, tx:0, ty:0};
+    _camFrame = _renderFrame; _camCache = {zoom:1, tx:0, ty:0};
+    return _camCache;
   }
   const Z = s.camera.zoom || 1.6;
   // cible : centre sur le joueur (lissage léger pour un suivi doux)
   const tx0 = State.player.x, ty0 = State.player.y;
   if(!camLerp.init){ camLerp.x=tx0; camLerp.y=ty0; camLerp.init=true; }
-  camLerp.x += (tx0-camLerp.x)*0.18;
-  camLerp.y += (ty0-camLerp.y)*0.18;
+  // lissage exponentiel indépendant de la fréquence d'affichage
+  const k = 1 - Math.pow(0.0001, _camDt);
+  camLerp.x += (tx0-camLerp.x)*k;
+  camLerp.y += (ty0-camLerp.y)*k;
   // demi-fenêtre visible (en fraction) à ce zoom
   const halfW = 0.5/Z, halfH = 0.5/Z;
   // bornage pour rester dans l'image [0..1]
@@ -179,9 +193,11 @@ function getCamera(){
   // translation en pixels de base : on veut que (cx,cy) -> centre écran
   const tx = GAME.baseW*0.5 - cx*GAME.baseW*Z;
   const ty = GAME.baseH*0.5 - cy*GAME.baseH*Z;
-  return {zoom:Z, tx, ty};
+  _camFrame = _renderFrame;
+  _camCache = {zoom:Z, tx, ty};
+  return _camCache;
 }
-function resetCamera(){ camLerp.init=false; }
+function resetCamera(){ camLerp.init=false; _camCache=null; _camFrame=-1; }
 /* projette une coord fraction -> pixel écran (canvas base) en tenant compte caméra */
 function projX(fx){ const c=getCamera(); return PX(fx)*c.zoom + c.tx; }
 function projY(fy){ const c=getCamera(); return PY(fy)*c.zoom + c.ty; }
@@ -216,6 +232,12 @@ window.addEventListener("keyup",(e)=>{
   if(isTextEntry(e.target)) return;
   if(KEYMAP[e.code]) keys[KEYMAP[e.code]] = false;
 });
+/* Si la fenêtre perd le focus (alt-tab, clic ailleurs) alors qu'une touche de
+   direction est enfoncée, le keyup n'arrive jamais et le personnage « glisse »
+   tout seul au retour. On remet donc les touches à zéro. */
+function clearMoveKeys(){ keys.up=keys.down=keys.left=keys.right=false; State.player.moving=false; }
+window.addEventListener("blur", clearMoveKeys);
+document.addEventListener("visibilitychange", ()=>{ if(document.hidden) clearMoveKeys(); });
 
 /* tactile */
 function bindTouch(){
@@ -253,9 +275,13 @@ function canStand(scene, x, y){
 
 /* ----------------------------- Boucle de jeu ----------------------------- */
 let last = 0;
+let _renderFrame = 0;
 function loop(t){
   const dt = Math.min(40, t-last)/1000; last = t;
-  if(State.screen==="play" && !State.overlay) updatePlayer(dt);
+  _renderFrame++;
+  advanceCamera(dt);
+  if(State.screen==="play" && !State.overlay && !transitioning) updatePlayer(dt);
+  else if(State.screen==="play" && (State.overlay || transitioning)) hintEl.classList.add("hidden");
   render(t);
   requestAnimationFrame(loop);
 }
@@ -269,7 +295,11 @@ function updatePlayer(dt){
   if(p.moving){
     if(Math.abs(dx)>Math.abs(dy)) p.dir = dx<0?"left":"right";
     else p.dir = dy<0?"up":"down";
-    const speed = 0.30; // fraction/seconde
+    // Vitesse en fraction d'écran/seconde. Dans les scènes zoomées (extérieurs),
+    // on ralentit légèrement pour que la vitesse RESSENTIE reste la même partout.
+    const sc = SCENES[State.scene];
+    const zoom = (sc && sc.camera && sc.camera.follow) ? (sc.camera.zoom || 1.6) : 1;
+    const speed = 0.32 / Math.sqrt(zoom);
     const len = Math.hypot(dx,dy)||1;
     const nx = p.x + (dx/len)*speed*dt;
     const ny = p.y + (dy/len)*speed*dt;
@@ -279,6 +309,7 @@ function updatePlayer(dt){
   } else {
     p.animPhase = 0;
   }
+  refreshZoneSuppression();
   updateHint();
 }
 
@@ -287,11 +318,38 @@ function zoneAvailable(z){
   if(!z.requires) return true;
   return !!State.flags[z.requires];
 }
+/* En arrivant dans une scène, le joueur se retrouve souvent PILE sur la zone
+   de porte par laquelle il vient d'entrer : l'indicateur « Sortir » s'affichait
+   aussitôt et un appui sur E le renvoyait immédiatement d'où il venait (et
+   pouvait même déclencher le générique de fin par accident). On neutralise donc
+   les portes sur lesquelles on atterrit, jusqu'à ce que le joueur s'en éloigne. */
+let suppressedZones = [];
+function armZoneSuppression(){
+  suppressedZones = [];
+  const s = SCENES[State.scene]; if(!s) return;
+  const p = State.player;
+  for(const z of s.zones){
+    if(z.action && z.action.type === "goto" && Math.hypot(p.x-z.x, p.y-z.y) < z.r){
+      suppressedZones.push(z.id);
+    }
+  }
+}
+function refreshZoneSuppression(){
+  if(!suppressedZones.length) return;
+  const s = SCENES[State.scene]; if(!s){ suppressedZones=[]; return; }
+  const p = State.player;
+  suppressedZones = suppressedZones.filter(id=>{
+    const z = s.zones.find(zz=>zz.id===id);
+    return z && Math.hypot(p.x-z.x, p.y-z.y) < z.r;
+  });
+}
 function nearestZone(){
   const s = SCENES[State.scene]; if(!s) return null;
+  if(transitioning) return null;
   const p = State.player; let best=null, bd=1e9;
   for(const z of s.zones){
     if(!zoneAvailable(z)) continue;
+    if(suppressedZones.includes(z.id)) continue;
     const d = Math.hypot(p.x-z.x, p.y-z.y);
     if(d < z.r && d < bd){ bd=d; best=z; }
   }
@@ -514,7 +572,15 @@ function fadeTo(cb){
   setTimeout(()=>{ cb&&cb(); setTimeout(()=>f.classList.remove("on"),60); }, 520);
 }
 
+/* Verrou de transition : sans lui, deux appuis rapides sur E enchaînaient deux
+   changements de scène (fondus superposés, arrivée dans la mauvaise pièce) et
+   le personnage continuait de marcher pendant le fondu au noir. */
+let transitioning = false;
 function gotoScene(scene, spawn){
+  if(transitioning) return;
+  transitioning = true;
+  clearMoveKeys();
+  hintEl.classList.add("hidden");
   fadeTo(()=>{
     const prev = State.scene;
     State.scene = scene;
@@ -522,8 +588,10 @@ function gotoScene(scene, spawn){
     if(spawn){ State.player.x=spawn.x; State.player.y=spawn.y; }
     State.player.dir = "up";
     resetCamera();
+    armZoneSuppression();
     setSceneTag(true);
     saveGame();
+    transitioning = false;
     onSceneEntered(scene, prev);
   });
 }
@@ -599,7 +667,7 @@ function onSceneEntered(scene, prev){
 function onInteract(){
   if(State.overlay==="signage"){ closeSignage(); return; }
   if(State.overlay==="dialog"){ advanceDialog(); return; }
-  if(State.screen!=="play" || State.overlay) return;
+  if(State.screen!=="play" || State.overlay || transitioning) return;
   const z = nearestZone();
   if(!z) return;
   runAction(z.action, z);
@@ -636,6 +704,10 @@ function runAction(a, zone){
   else if(a.type==="gap_match"){ gapMatchFlow(); }
   else if(a.type==="gap_q"){ gapQuestionFlow(); }
   else if(a.type==="gap_affiches"){ celineFlow(); }
+  else if(a.type==="clotilde"){ clotildeFlow(); }
+  else if(a.type==="karine"){ karineFlow(); }
+  else if(a.type==="stephane"){ stephaneFlow(); }
+  else if(a.type==="mariehelene"){ marieHeleneFlow(); }
   else if(a.type==="signage"){ openSignage(); }
   else if(a.type==="travelMenu"){ openTravelMenu(); }
 }
@@ -643,6 +715,8 @@ function runAction(a, zone){
 /* ----------------------------- Système de dialogue ----------------------------- */
 let dlg = null;
 function openDialog(speaker, lines, cls, onEnd){
+  clearMoveKeys();
+  hintEl.classList.add("hidden");
   State.overlay = "dialog";
   dlg = { speaker, lines:[...lines], cls, idx:0, onEnd, typing:false };
   renderDialog();
@@ -718,6 +792,7 @@ function jeromeFlow(){
 
 /* ----------------------------- Fenêtre signalétique (overlay pixel art) ----------------------------- */
 function openSignage(){
+  clearMoveKeys();
   State.overlay = "signage";
   markExplored("totem");
   unlockNote("sp_listen");
@@ -760,6 +835,7 @@ function isAgenceDone(id){
 }
 
 function openTravelMenu(){
+  clearMoveKeys();
   State.overlay = "travel";
   const pts = ACCUEIL_POINTS.map(p=>{
     const cur  = (p.id === currentAccueilId());
@@ -915,6 +991,7 @@ function rouxFlow(){
 /* ----------------------------- QCM générique (2 situations) ----------------------------- */
 let quiz = null;
 function startQuiz(question, kind){
+  clearMoveKeys();
   State.overlay = "quiz";
   quiz = { answered:false, q:question, kind:kind };
   renderQuiz();
@@ -975,6 +1052,12 @@ function answerQuiz(k){
              notes:["cou_aidant","sp_all"], finish:finishCoustelletQuestion },
     digne:{ second:"digneQSecond", who:"Jennifer", retry:DIALOG.digne_second_try,
              notes:["dig_inclusion","sp_all"], finish:finishDigneQuestion },
+    clotilde:{ second:"clotildeSecond", who:"Clotilde", retry:DIALOG.clotilde_second_try,
+             notes:["eq_reclamation","sp_all"], finish:finishClotilde },
+    karine:{ second:"karineSecond", who:"KARINE", retry:DIALOG.karine_second_try,
+             notes:["eq_jdma","sp_all"], finish:finishKarine },
+    mariehelene:{ second:"mhSecond", who:"Marie-Hélène", retry:DIALOG.mariehelene_second_try,
+             notes:["eq_accessibilite","sp_all"], finish:finishMarieHelene },
     gap:{ second:"gapQSecond", who:"Coraline", retry:DIALOG.gap_second_try,
              notes:["gap_boucle","sp_all"], finish:finishGapQuestion },
     gap_affiches:{ second:"gapAffichesSecond", who:"Céline", retry:DIALOG.celine_second_try,
@@ -1394,6 +1477,84 @@ function celineFlow(){
   });
 }
 
+/* ===================== Avignon — bureau partagé ===================== */
+/* Clotilde : QCM sur le traitement d'une réclamation (épreuve facultative) */
+function clotildeFlow(){
+  if(State.flags.clotildeDone){
+    openDialog("Clotilde", DIALOG.clotilde_done, "", ()=>{});
+    return;
+  }
+  openDialog("Clotilde", DIALOG.clotilde_intro, "", ()=>{
+    startQuiz(QUESTION_CLOTILDE, "clotilde");
+  });
+}
+function finishClotilde(){
+  State.overlay="dialog";
+  openDialog("Clotilde", DIALOG.clotilde_debrief, "green", ()=>{
+    State.flags.clotildeDone = true;
+    unlockNote("eq_collectif");
+    saveGame();
+    showDossierStamp("✓ Réclamation prise en compte", ()=>{
+      State.overlay=null; ui.innerHTML="";
+    });
+  });
+}
+
+/* KARINE : QCM sur le dispositif « Je donne mon avis » (épreuve facultative) */
+function karineFlow(){
+  if(State.flags.karineDone){
+    openDialog("KARINE", DIALOG.karine_done, "", ()=>{});
+    return;
+  }
+  openDialog("KARINE", DIALOG.karine_intro, "", ()=>{
+    startQuiz(QUESTION_KARINE, "karine");
+  });
+}
+function finishKarine(){
+  State.overlay="dialog";
+  openDialog("KARINE", DIALOG.karine_debrief, "green", ()=>{
+    State.flags.karineDone = true;
+    unlockNote("eq_collectif");
+    saveGame();
+    showDossierStamp("✓ Avis usagers exploités", ()=>{
+      State.overlay=null; ui.innerHTML="";
+    });
+  });
+}
+
+/* Stéphane : PNJ d'ambiance, oriente vers Clotilde et KARINE */
+function stephaneFlow(){
+  markExplored("stephane");
+  if(State.flags.clotildeDone && State.flags.karineDone){
+    openDialog("Stéphane", DIALOG.stephane_all_done, "", ()=>{ unlockNote("eq_collectif"); });
+    return;
+  }
+  openDialog("Stéphane", DIALOG.stephane_intro, "", ()=>{});
+}
+
+/* ===================== Digne — Marie-Hélène ===================== */
+/* QCM sur l'accessibilité de l'accueil (épreuve facultative) */
+function marieHeleneFlow(){
+  if(State.flags.mhDone){
+    openDialog("Marie-Hélène", DIALOG.mariehelene_done, "", ()=>{});
+    return;
+  }
+  openDialog("Marie-Hélène", DIALOG.mariehelene_intro, "", ()=>{
+    startQuiz(QUESTION_MARIEHELENE, "mariehelene");
+  });
+}
+function finishMarieHelene(){
+  State.overlay="dialog";
+  openDialog("Marie-Hélène", DIALOG.mariehelene_debrief, "green", ()=>{
+    State.flags.mhDone = true;
+    unlockNote("eq_accessibilite");
+    saveGame();
+    showDossierStamp("✓ Accueil accessible à tous", ()=>{
+      State.overlay=null; ui.innerHTML="";
+    });
+  });
+}
+
 function finishGapAffiches(){
   State.overlay="dialog";
   openDialog("Céline", DIALOG.celine_debrief, "green", ()=>{
@@ -1409,6 +1570,7 @@ function finishGapAffiches(){
 
 /* ===================== Jeu de classement par glisser-déposer (Manosque) ===================== */
 function openMatchGame(data, secondFlagKey, onFinish){
+  clearMoveKeys();
   State.overlay = "match";
   data = data || MATCH_MANOSQUE;
   secondFlagKey = secondFlagKey || "manosqueMatchSecond";
@@ -1556,9 +1718,21 @@ function showDossierStamp(label, onClose){
       </div>
     </div>
    </div>`;
-  document.getElementById("endBtn").addEventListener("click",()=>{
+  const endBtn = document.getElementById("endBtn");
+  const closeStamp = ()=>{
+    window.removeEventListener("keydown", stampKey, true);
     State.overlay=null; ui.innerHTML=""; onClose && onClose();
-  });
+  };
+  // On pouvait rester bloqué à ce tampon en jouant uniquement au clavier :
+  // E, Entrée et Espace valident désormais aussi.
+  function stampKey(e){
+    if(e.code==="KeyE" || e.code==="Enter" || e.code==="Space"){
+      e.preventDefault(); e.stopPropagation(); closeStamp();
+    }
+  }
+  window.addEventListener("keydown", stampKey, true);
+  endBtn.addEventListener("click", closeStamp);
+  endBtn.focus();
 }
 
 /* ----------------------------- Carnet de mission ----------------------------- */
@@ -1613,6 +1787,7 @@ function renderJournal(){
         ${sec("Coustellet — publics fragiles", JOURNAL_NOTES.coustellet)}
         ${sec("Digne — accompagnement au numérique", JOURNAL_NOTES.digne)}
         ${sec("Gap — écoute & amélioration", JOURNAL_NOTES.gap)}
+        ${sec("Repères d'équipe", JOURNAL_NOTES.equipe)}
         <div class="j-section">
           <h3>Progression</h3>
           <div class="progress-row">
@@ -1775,7 +1950,7 @@ function showCredits(){
        <section class="cr-block">
          <h3>Réalisation</h3>
          <p>
-           Jeu conçu et réalisé sur son temps libre par <strong>Jérôme Mollé</strong>,
+           Jeu conçu et réalisé par <strong>Jérôme Mollé</strong>,
            avec le concours de l'intelligence artificielle. Toute ressemblance avec des personnes existantes est fortuite.
          </p>
        </section>
@@ -1873,7 +2048,7 @@ function showCreator(){
 /* ----------------------------- Démarrages ----------------------------- */
 function newGame(){
   eraseSave();
-  Object.assign(State.flags,{metLeslie:false,metJerome:false,missionStarted:false,missionDone:false,secondAttempt:false,firstTryCorrect:false,lienOffered:false,lienMet:false,lienDone:false,lienSecondAttempt:false,lienExtSeen:false,carpOffered:false,carpMet:false,carpDone:false,carpSecondAttempt:false,carpExtSeen:false,orangeOffered:false,orangeMet:false,orangeDone:false,orangeSecondAttempt:false,orangeExtSeen:false,manosqueOffered:false,manosqueMet:false,manosqueExtSeen:false,manosqueMatchDone:false,manosqueMatchSecond:false,manosqueQDone:false,manosqueQSecond:false,coustelletOffered:false,coustelletMet:false,coustelletExtSeen:false,coustelletMatchDone:false,coustelletMatchSecond:false,coustelletQDone:false,coustelletQSecond:false,digneOffered:false,digneMet:false,digneExtSeen:false,digneMatchDone:false,digneMatchSecond:false,digneQDone:false,digneQSecond:false,gapOffered:false,gapMet:false,gapExtSeen:false,gapMatchDone:false,gapMatchSecond:false,gapQDone:false,gapQSecond:false,gapAffichesDone:false,gapAffichesSecond:false,gapAffichesStarted:false,endingSequenceStarted:false});
+  Object.assign(State.flags,{metLeslie:false,metJerome:false,missionStarted:false,missionDone:false,secondAttempt:false,firstTryCorrect:false,lienOffered:false,lienMet:false,lienDone:false,lienSecondAttempt:false,lienExtSeen:false,carpOffered:false,carpMet:false,carpDone:false,carpSecondAttempt:false,carpExtSeen:false,orangeOffered:false,orangeMet:false,orangeDone:false,orangeSecondAttempt:false,orangeExtSeen:false,manosqueOffered:false,manosqueMet:false,manosqueExtSeen:false,manosqueMatchDone:false,manosqueMatchSecond:false,manosqueQDone:false,manosqueQSecond:false,coustelletOffered:false,coustelletMet:false,coustelletExtSeen:false,coustelletMatchDone:false,coustelletMatchSecond:false,coustelletQDone:false,coustelletQSecond:false,digneOffered:false,digneMet:false,digneExtSeen:false,digneMatchDone:false,digneMatchSecond:false,digneQDone:false,digneQSecond:false,gapOffered:false,gapMet:false,gapExtSeen:false,gapMatchDone:false,gapMatchSecond:false,gapQDone:false,gapQSecond:false,gapAffichesDone:false,gapAffichesSecond:false,gapAffichesStarted:false,clotildeDone:false,clotildeSecond:false,karineDone:false,karineSecond:false,mhDone:false,mhSecond:false,endingSequenceStarted:false});
   State.notes={}; State.explored={};
   State.scores={exactitude:0,posture:0,efficacite:0,exploration:0};
   showCreator();
@@ -1881,6 +2056,10 @@ function newGame(){
 function continueGame(){
   if(loadGame()){
     ui.innerHTML="";
+    State.overlay=null;
+    transitioning=false;
+    suppressedZones=[];
+    clearMoveKeys();
     State.screen="play";
     resetCamera();
     setSceneTag(true);
